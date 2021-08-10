@@ -28,6 +28,7 @@
 #include <getopt.h>
 #include <errno.h>
 #include <assert.h>
+#include <jpeglib.h>
 
 #include "../libs/config.h"
 #include "../libs/tools.h"
@@ -35,16 +36,123 @@
 #include "../libs/frame.h"
 #include "../libs/memsink.h"
 #include "../libs/options.h"
-
+#include "../libs/yuv2rgb.h"
+#include "../libs/bmp_utils.h"
 #include "file.h"
 
+
+write_JPEG_file(char *filename, unsigned char *image_buffer, int width, int height, int quality)
+{
+	struct jpeg_compress_struct cinfo;
+
+	struct jpeg_error_mgr jerr;
+
+	FILE *outfile; /* target file */
+	JSAMPROW row_pointer[1];
+	int row_stride; /* physical row width in image buffer */
+	cinfo.err = jpeg_std_error(&jerr);
+
+	jpeg_create_compress(&cinfo);
+
+	if ((outfile = fopen(filename, "wb")) == NULL)
+	{
+		fprintf(stderr, "can't open %s\n", filename);
+		exit(1);
+	}
+	jpeg_stdio_dest(&cinfo, outfile);
+
+	cinfo.image_width = width; /* image width and height, in pixels */
+	cinfo.image_height = height;
+	cinfo.input_components = 3;		/* # of color components per pixel */
+	cinfo.in_color_space = JCS_RGB; /* colorspace of input image */
+
+	jpeg_set_defaults(&cinfo);
+
+	jpeg_set_quality(&cinfo, quality, TRUE /* limit to baseline-JPEG values */);
+
+	jpeg_start_compress(&cinfo, TRUE);
+
+	row_stride = width * 3; /* JSAMPLEs per row in image_buffer */
+
+	while (cinfo.next_scanline < cinfo.image_height)
+	{
+
+		row_pointer[0] = &image_buffer[cinfo.next_scanline * row_stride];
+		(void)jpeg_write_scanlines(&cinfo, row_pointer, 1);
+	}
+	jpeg_finish_compress(&cinfo);
+	fclose(outfile);
+	jpeg_destroy_compress(&cinfo);
+}
+
+int save_bmp422(const char *yuvfile, const char *bmpfile, int width, int height)
+{
+	FILE *fp1;
+	int frameSize = 0;
+	int picSize = 0;
+	int ret = 0;
+	int i = 0;
+	unsigned char *framePtr = NULL;
+	unsigned char *rgbPtr = NULL;
+	long rgbSize = 0;
+
+	rgbSize = width * height * 3;
+	frameSize = width * height;
+
+	// yuv422p: w * h * 2
+	// yuv420p: w * h * 3 / 2
+	picSize = frameSize * 2;
+	;
+
+	framePtr = (unsigned char *)malloc(sizeof(unsigned char) * picSize);
+	if (framePtr == NULL)
+	{
+		printf("malloc failed.\n");
+		return -1;
+	}
+	memset(framePtr, '\0', picSize);
+
+	rgbPtr = (unsigned char *)malloc(sizeof(unsigned char) * rgbSize);
+	if (rgbPtr == NULL)
+	{
+		printf("malloc failed.\n");
+		return -1;
+	}
+	memset(rgbPtr, '\0', rgbSize);
+
+	if ((fp1 = fopen(yuvfile, "rb")) == NULL)
+	{
+		printf("open yuv file failed.\n");
+		return -1;
+	}
+
+	ret = (int)fread(framePtr, 1, picSize, fp1);
+
+	//yuv422p_to_rgb24(framePtr, rgbPtr, width, height);
+	// yuv_to_rgb24(YUV422, framePtr, rgbPtr, width, height);
+	YUYVToRGB24_Native(framePtr, rgbPtr, width, height);
+
+	write_JPEG_file("/tmp/current.jpg", rgbPtr, width, height, 100);
+	// rgb --> bgr
+	swap_rgb(rgbPtr, rgbSize);
+	// save file
+	write_bmp_file(bmpfile, rgbPtr, width, height);
+
+	fclose(fp1);
+
+	free(framePtr);
+	free(rgbPtr);
+	LOG_VERBOSE("done.\n");
+	// printf("done.\n");
+	return 0;
+}
 
 enum _OPT_VALUES {
 	_O_SINK = 's',
 	_O_SINK_TIMEOUT = 't',
 	_O_OUTPUT = 'o',
 	_O_OUTPUT_JSON = 'j',
-
+	 _O_FILE = 'f',
 	_O_HELP = 'h',
 	_O_VERSION = 'v',
 
@@ -61,7 +169,7 @@ static const struct option _LONG_OPTS[] = {
 	{"sink-timeout",		required_argument,	NULL,	_O_SINK_TIMEOUT},
 	{"output",				required_argument,	NULL,	_O_OUTPUT},
 	{"output-json",			no_argument,		NULL,	_O_OUTPUT_JSON},
-
+	{"file",                required_argument,  NULL,   _O_FILE},
 	{"log-level",			required_argument,	NULL,	_O_LOG_LEVEL},
 	{"perf",				no_argument,		NULL,	_O_PERF},
 	{"verbose",				no_argument,		NULL,	_O_VERBOSE},
@@ -89,7 +197,7 @@ typedef struct {
 static void _signal_handler(int signum);
 static void _install_signal_handlers(void);
 
-static int _dump_sink(const char *sink_name, unsigned sink_timeout, _output_context_s *ctx);
+static int _dump_sink(const char *sink_name, unsigned sink_timeout, _output_context_s *ctx,char *outfile);
 
 static void _help(FILE *fp);
 
@@ -101,6 +209,7 @@ int main(int argc, char *argv[]) {
 	char *sink_name = NULL;
 	unsigned sink_timeout = 1;
 	char *output_path = NULL;
+	char *output_file = NULL;
 	bool output_json = false;
 
 #	define OPT_SET(_dest, _value) { \
@@ -127,7 +236,7 @@ int main(int argc, char *argv[]) {
 			case _O_SINK_TIMEOUT:	OPT_NUMBER("--sink-timeout", sink_timeout, 1, 60, 0);
 			case _O_OUTPUT:			OPT_SET(output_path, optarg);
 			case _O_OUTPUT_JSON:	OPT_SET(output_json, true);
-
+			case _O_FILE:			OPT_SET(output_file, optarg);
 			case _O_LOG_LEVEL:			OPT_NUMBER("--log-level", us_log_level, LOG_LEVEL_INFO, LOG_LEVEL_DEBUG, 0);
 			case _O_PERF:				OPT_SET(us_log_level, LOG_LEVEL_PERF);
 			case _O_VERBOSE:			OPT_SET(us_log_level, LOG_LEVEL_VERBOSE);
@@ -163,7 +272,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	_install_signal_handlers();
-	int retval = abs(_dump_sink(sink_name, sink_timeout, &ctx));
+	int retval = abs(_dump_sink(sink_name, sink_timeout, &ctx, output_file));
 	if (ctx.v_output && ctx.destroy) {
 		ctx.destroy(ctx.v_output);
 	}
@@ -201,7 +310,7 @@ static void _install_signal_handlers(void) {
 	assert(!sigaction(SIGPIPE, &sig_act, NULL));
 }
 
-static int _dump_sink(const char *sink_name, unsigned sink_timeout, _output_context_s *ctx) {
+static int _dump_sink(const char *sink_name, unsigned sink_timeout, _output_context_s *ctx,char *outfile) {
 	frame_s *frame = frame_init();
 	memsink_s *sink = NULL;
 
@@ -220,7 +329,11 @@ static int _dump_sink(const char *sink_name, unsigned sink_timeout, _output_cont
 		if (error == 0) {
 			const long double now = get_now_monotonic();
 			const long long now_second = floor_ms(now);
-
+			long double nowDelt = now - frame->grab_ts;
+			if (nowDelt > 0.1)
+			{
+				continue;
+			}
 			char fourcc_str[8];
 			LOG_VERBOSE("Frame: size=%zu, res=%ux%u, fourcc=%s, stride=%u, online=%d, key=%d, latency=%.3Lf, diff=%.3Lf",
 				frame->used, frame->width, frame->height,
@@ -242,6 +355,10 @@ static int _dump_sink(const char *sink_name, unsigned sink_timeout, _output_cont
 
 			if (ctx->v_output) {
 				ctx->write(ctx->v_output, frame);
+				char bmpfile[100] = {0};
+				snprintf(bmpfile, 100, "%s.bmp", outfile);
+				save_bmp422("a.yuv", bmpfile, 1920, 1080);
+				global_stop = true;
 			}
 		} else if (error == -2) {
 			usleep(1000);
