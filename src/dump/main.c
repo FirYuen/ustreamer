@@ -399,6 +399,7 @@ static void _help(FILE *fp) {
 	SAY("    -t|--sink-timeout <sec>  ─ Timeout for the upcoming frame. Default: 1.\n");
 	SAY("    -o|--output <filename> ─── Filename to dump output to. Use '-' for stdout. Default: just consume the sink.\n");
 	SAY("    -j|--output-json  ──────── Format output as JSON. Required option --output. Default: disabled.\n");
+	SAY("    -f|--output-bmp ──────── out put a bmp.\n");
 	SAY("Logging options:");
 	SAY("════════════════");
 	SAY("    --log-level <N>  ──── Verbosity level of messages from 0 (info) to 3 (debug).");
